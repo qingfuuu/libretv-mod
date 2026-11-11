@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/client-api';
 import { isInDisabledSubscription, isSourceDisabled, resolveSource, useAppStore } from '@/lib/store';
@@ -47,20 +47,34 @@ export function SourceFeed({ onOpen }: { onOpen: (item: SearchResultItem) => voi
       .filter((s) => !isInDisabledSubscription({ subscriptions }, s.key));
   }, [customAPIs, envSources, selectedKeys, sourceHealth, subscriptions]);
 
+  // 流式接收：每个源一结算就上屏，慢源不再拖住整块内容
+  const [streamed, setStreamed] = useState<FeedSourceResult[]>([]);
+  const sourceKey = sources.map((s) => s.key).join('|');
+
   const query = useQuery({
-    queryKey: ['feed', sources.map((s) => s.key), yellowFilter],
-    queryFn: ({ signal }) => api.feed(sources, 16, yellowFilter, signal),
+    queryKey: ['feed', sourceKey, yellowFilter],
+    queryFn: ({ signal }) => {
+      setStreamed([]);
+      return api.feedStream(
+        sources,
+        16,
+        yellowFilter,
+        (result) => setStreamed((prev) => [...prev, result]),
+        signal
+      );
+    },
     enabled: sources.length > 0,
     staleTime: 2 * 60 * 1000,
     refetchOnWindowFocus: false,
   });
 
-  const results = query.data?.sources ?? [];
+  const results = query.data?.sources ?? streamed;
   const ranked = useMemo(
     () => results.filter((r) => r.ok).sort((a, b) => a.ms - b.ms),
     [results]
   );
   const failed = results.filter((r) => !r.ok);
+  const pending = query.isLoading && streamed.length === 0;
 
   /** 各源轮流取值 + 同名去重：先取每个源的第 1 部，再取第 2 部…… */
   const merged = useMemo(() => mergeFeeds(ranked, MERGED_LIMIT), [ranked]);
@@ -74,7 +88,9 @@ export function SourceFeed({ onOpen }: { onOpen: (item: SearchResultItem) => voi
         <h2 className="text-sm font-medium text-content">最新上架</h2>
         <span className="text-[11px] text-faint">
           {query.isLoading
-            ? '正在汇总各源…'
+            ? streamed.length > 0
+              ? `已就绪 ${streamed.length}/${sources.length} 个源 · ${merged.length} 部新片`
+              : '正在汇总各源…'
             : `${ranked.length}/${sources.length} 个源可用 · ${merged.length} 部新片`}
         </span>
         <Link
@@ -103,7 +119,7 @@ export function SourceFeed({ onOpen }: { onOpen: (item: SearchResultItem) => voi
         </div>
       )}
 
-      {query.isLoading ? (
+      {pending ? (
         <FeedSkeleton />
       ) : query.isError ? (
         <p className="py-6 text-center text-sm text-faint">

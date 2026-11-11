@@ -47,6 +47,11 @@ export interface AppSettings {
   /** 用户是否在设置中主动选择过封面图加载方式；为 false 时部署者的 DEFAULT_IMAGE_MODE 默认值可生效 */
   imageProxyModeTouched: boolean;
   customImageProxy: string;
+  /**
+   * 播放总是走服务器代理：默认 false（直连片源 CDN）。
+   * 打开后所有分片经 /api/proxy 转发，用于直连被 CDN 掐流/限速、反复缓冲的场景。
+   */
+  forceProxyPlayback: boolean;
 }
 
 /** 一次订阅同步导入的数量（点播 / 直播），用于列表内展示同步结果 */
@@ -362,6 +367,7 @@ export const useAppStore = create<AppState>()(
       imageProxyMode: 'direct',
       imageProxyModeTouched: false,
       customImageProxy: '',
+      forceProxyPlayback: false,
 
       addCustomApi: (api) => {
         const list = get().customAPIs;
@@ -957,6 +963,7 @@ export const useAppStore = create<AppState>()(
         imageProxyMode: s.imageProxyMode,
         imageProxyModeTouched: s.imageProxyModeTouched,
         customImageProxy: s.customImageProxy,
+        forceProxyPlayback: s.forceProxyPlayback,
       }),
       // 同步 storage 会在模块加载时立即 rehydrate（早于 React hydration），
       // 一旦首屏渲染依赖持久化状态就会与 SSR 输出不一致。

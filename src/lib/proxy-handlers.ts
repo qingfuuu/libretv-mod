@@ -1,4 +1,6 @@
 import { NextResponse } from 'next/server';
+import { appendFileSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { guardRequest, jsonError } from '@/lib/api-guard';
 import { checkLiveUrlAllowed, isBlockedByDNS, isValidProxyUrl } from '@/lib/ssrf';
 import { fetchWithSafeRedirects } from '@/lib/fetch-utils';
@@ -21,6 +23,29 @@ const HEADER_TIMEOUT_MS = 15_000;
 const UA =
   process.env.USER_AGENT ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
+/**
+ * 代理诊断日志：记录每条分片请求的上游期望长度 / 实际转发字节 / 耗时 / 结束原因。
+ * 播放卡顿时据此区分「上游 CDN 提前断流」与「本地转发中断」，比浏览器控制台只报
+ * ERR_INCOMPLETE_CHUNKED_ENCODING 有用得多。写在 <cwd>/logs/proxy.log，超过 5MB 自动清空。
+ */
+const LOG_DIR = path.join(process.cwd(), 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'proxy.log');
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+
+function proxyLog(line: string): void {
+  try {
+    mkdirSync(LOG_DIR, { recursive: true });
+    try {
+      if (statSync(LOG_FILE).size > LOG_MAX_BYTES) writeFileSync(LOG_FILE, '');
+    } catch {
+      /* 文件还不存在 */
+    }
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    /* 日志失败绝不影响代理本身 */
+  }
+}
 
 /**
  * 精确域名匹配：仅 `douban.com` 本身及其子域放行。
@@ -117,6 +142,7 @@ export async function handleProxyRequest(req: Request, targetUrl: string): Promi
     }
   }
   if (!response) {
+    proxyLog(`status=502 fetch-fail err=${lastError instanceof Error ? lastError.message : 'unknown'} url=${targetUrl}`);
     return new NextResponse(
       `代理请求失败: ${lastError instanceof Error ? lastError.message : '未知错误'}`,
       { status: 502 }
@@ -131,6 +157,7 @@ export async function handleProxyRequest(req: Request, targetUrl: string): Promi
   // m3u8 文本：重写为代理地址（以重定向后的最终 URL 为 base 解析相对地址）
   if (isM3u8) {
     const text = await response.text();
+    proxyLog(`m3u8 status=${response.status} len=${text.length} url=${targetUrl}`);
     return new NextResponse(rewriteM3u8(text, finalUrl), {
       status: response.status,
       headers: {
@@ -155,7 +182,49 @@ export async function handleProxyRequest(req: Request, targetUrl: string): Promi
   );
   outHeaders.set('Access-Control-Allow-Origin', '*');
 
-  return new NextResponse(response.body, {
+  // 逐条记录分片的真实字节数：卡顿时能区分「上游提前断开」与「本地转发中断」
+  const expected = Number.parseInt(response.headers.get('content-length') || '', 10);
+  const startedAt = Date.now();
+  let sent = 0;
+  const logOnce = (outcome: string) => {
+    proxyLog(
+      `status=${response?.status ?? '-'} expect=${Number.isFinite(expected) ? expected : '-'} sent=${sent} ` +
+        `ms=${Date.now() - startedAt} outcome=${outcome} url=${targetUrl}`
+    );
+  };
+
+  const body = response.body
+    ? new ReadableStream<Uint8Array>({
+        start(controller) {
+          const reader = response.body!.getReader();
+          const pump = (): void => {
+            reader.read().then(
+              ({ done, value }) => {
+                if (done) {
+                  logOnce('eof');
+                  controller.close();
+                  return;
+                }
+                sent += value.byteLength;
+                controller.enqueue(value);
+                pump();
+              },
+              (err: unknown) => {
+                logOnce(`error:${err instanceof Error ? err.message : 'unknown'}`);
+                controller.error(err);
+              }
+            );
+          };
+          pump();
+        },
+        cancel(reason) {
+          logOnce(`client-cancel:${String(reason ?? '')}`);
+          response?.body?.cancel(reason).catch(() => {});
+        },
+      })
+    : null;
+
+  return new NextResponse(body, {
     status: response.status,
     headers: outHeaders,
   });

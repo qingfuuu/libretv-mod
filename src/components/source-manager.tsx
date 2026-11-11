@@ -626,7 +626,28 @@ function PlaybackPanel() {
       />
 
       <VideoCachePanel />
+      <PlaybackProxyPanel />
     </section>
+  );
+}
+
+/**
+ * 播放代理开关：默认直连片源 CDN；当分片被 CDN 掐流 / CORS 拦截、
+ * 表现为「一直缓冲、控制台大量 ERR_INCOMPLETE_CHUNKED_ENCODING」时打开，
+ * 所有分片改由本站服务器转发（服务端拉取通常不受浏览器侧的限流影响）。
+ */
+function PlaybackProxyPanel() {
+  const enabled = useAppStore((s) => s.forceProxyPlayback);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  return (
+    <div className="pt-3 mt-3 border-t border-line">
+      <ToggleRow
+        label="播放总是走服务器代理"
+        description="关闭时直连片源 CDN；播放反复缓冲、控制台报分片加载失败时打开，所有分片经本站转发（更吃服务器流量和 CPU）"
+        checked={enabled}
+        onChange={(v) => updateSettings({ forceProxyPlayback: v })}
+      />
+    </div>
   );
 }
 

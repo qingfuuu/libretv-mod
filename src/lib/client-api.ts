@@ -1,6 +1,6 @@
 'use client';
 
-import type { SearchResponse, SearchStreamEvent, SourceSearchOutcome, VideoDetail, DoubanResponse, BangumiCalendarResponse, AuthStatusResponse, SourceConfig, SearchResultItem, LivePlaylistResponse, LiveEpgResponse, SourceListPayload, QualityProbeItem, QualityProbeResult, FeedResponse, CatalogResponse, LibraryResponse } from './types';
+import type { SearchResponse, SearchStreamEvent, SourceSearchOutcome, VideoDetail, DoubanResponse, BangumiCalendarResponse, AuthStatusResponse, SourceConfig, SearchResultItem, LivePlaylistResponse, LiveEpgResponse, SourceListPayload, QualityProbeItem, QualityProbeResult, FeedResponse, CatalogResponse, LibraryResponse, FeedSourceResult } from './types';
 
 /**
  * 客户端 API 封装。401 时触发全局事件打开登录框，
@@ -156,6 +156,36 @@ export const api = {
       body: JSON.stringify({ sources: payload, limit, filterAdult }),
       signal,
     });
+  },
+
+  /**
+   * 首页「各源最新」（流式）：每个源一结算就回调，边收边上屏；
+   * 最终以聚合结果 resolve。慢源不再拖住整块内容。
+   */
+  feedStream: async (
+    sources: SourceConfig[],
+    limit: number,
+    filterAdult: boolean,
+    onSource: (result: FeedSourceResult) => void,
+    signal?: AbortSignal
+  ): Promise<FeedResponse> => {
+    const payload = sources.map(({ key, name, url, detail, isAdult }) => ({ key, name, url, detail, isAdult }));
+    const res = await fetch('/api/feed?stream=1', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources: payload, limit, filterAdult }),
+      signal,
+    });
+    throwForAuthStatus(res);
+    if (!res.ok || !res.body) throw new ApiError(`请求失败 (${res.status})`, res.status);
+
+    type Event = ({ type: 'source' } & FeedSourceResult) | { type: 'done'; sources: FeedSourceResult[] };
+    let final: FeedResponse = { sources: [] };
+    await consumeNdjson<Event>(res, (event) => {
+      if (event.type === 'source') onSource(event);
+      else if (event.type === 'done') final = { sources: event.sources };
+    });
+    return final;
   },
 
   /** 片库：按分类浏览单个源，page 从 1 开始 */

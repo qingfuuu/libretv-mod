@@ -78,6 +78,8 @@ interface PlayerShellProps {
    * 关闭后收起即完全隐藏。类名同步见 lib/mini-progress-bar.ts。
    */
   miniProgressBar?: boolean;
+  /** 播放总是走服务器代理：分片全部经 /api/proxy 转发（直连被 CDN 掐流时的兜底） */
+  forceProxyPlayback?: boolean;
   /** 中段两步态的起点：由页面层持有，面板与快捷键共用同一份状态 */
   pendingStart: number | null;
   /** 更新中段起点；null 表示取消或已消费 */
@@ -120,6 +122,7 @@ export function PlayerShell({
   autoSkipSegments,
   volumeBoost,
   miniProgressBar = true,
+  forceProxyPlayback = false,
   pendingStart,
   onPendingStart,
   onPlayerApi,
@@ -152,6 +155,7 @@ export function PlayerShell({
   // 始终持有最新 props/回调，避免重建播放器
   const propsRef = useRef({
     url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, volumeBoost, miniProgressBar,
+    forceProxyPlayback,
     pendingStart, onPendingStart, onPlayerApi, onRecordSegment,
     episodeKey, nextUrl, nextEpisodeKey,
     getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
@@ -159,6 +163,7 @@ export function PlayerShell({
   });
   propsRef.current = {
     url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, volumeBoost, miniProgressBar,
+    forceProxyPlayback,
     pendingStart, onPendingStart, onPlayerApi, onRecordSegment,
     episodeKey, nextUrl, nextEpisodeKey,
     getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
@@ -357,9 +362,15 @@ export function PlayerShell({
   /**
    * 初始化/切换 HLS。allowProxyFallback：直连致命网络错误（CORS/防盗链/分片被拒）时，
    * 自动改走同源 cookie 鉴权的 /api/proxy 重试一次。
+   * forceProxyPlayback（设置项）：从起播就用代理形态，所有分片经本站转发——
+   * 用于直连被 CDN 掐流/限速、但服务端拉取正常的源。
    * 注意：不销毁 ArtPlayer，只销毁并重建 hls，从而保留网页全屏等播放器状态。
    */
-  const setupHls = (video: HTMLVideoElement, mediaUrl: string, allowProxyFallback: boolean) => {
+  const setupHls = (video: HTMLVideoElement, rawUrl: string, allowProxyFallback: boolean) => {
+    const mediaUrl =
+      propsRef.current.forceProxyPlayback && /^https?:\/\//i.test(rawUrl)
+        ? `/api/proxy?url=${encodeURIComponent(rawUrl)}`
+        : rawUrl;
     restoreCleanupRef.current?.();
     restoreCleanupRef.current = null;
     hlsRef.current?.destroy();

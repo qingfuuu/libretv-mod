@@ -328,6 +328,7 @@ function WatchContent() {
                   autoSkipSegments={store.autoSkipSegments}
                   volumeBoost={store.volumeBoost}
                   miniProgressBar={store.miniProgressBar}
+                  forceProxyPlayback={store.forceProxyPlayback}
                   pendingStart={pendingStart}
                   onPendingStart={setPendingStart}
                   onPlayerApi={(api) => { playerApiRef.current = api; }}

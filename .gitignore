@@ -12,3 +12,4 @@ vitest-results.json
 .zcode/
 .codebuddy/
 generated-images/
+logs/

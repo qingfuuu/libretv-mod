@@ -46,6 +46,46 @@ export async function POST(req: Request) {
   const limit = Math.min(24, Math.max(1, Number(body.limit) || DEFAULT_LIMIT));
   const filterAdult = body.filterAdult !== false;
 
+  // 流式模式：每个源一结算就推一条，前端边收边上屏；
+  // 否则 Promise.all 要等最慢的源（最长 6 秒）才渲染，首页会明显卡顿。
+  if (new URL(req.url).searchParams.get('stream') === '1') {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let closed = false;
+        const send = (event: unknown) => {
+          if (closed) return;
+          try {
+            controller.enqueue(encoder.encode(JSON.stringify(event) + '\n'));
+          } catch {
+            closed = true; // 客户端已断开
+          }
+        };
+        const results = await Promise.all(
+          sources.map(async (source) => {
+            const result = await loadSource(source, limit, filterAdult);
+            send({ type: 'source', ...result });
+            return result;
+          })
+        );
+        send({ type: 'done', sources: results });
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* 已断开 */
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Accel-Buffering': 'no',
+      },
+    });
+  }
+
   const results = await Promise.all(sources.map((source) => loadSource(source, limit, filterAdult)));
   const payload: FeedResponse = { sources: results };
   return NextResponse.json(payload);
