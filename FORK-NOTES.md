@@ -18,7 +18,6 @@
 - 相关接口：`POST /api/feed`（多源并行取最新 + 返回耗时，单源失败不影响其它源）。
 
 ### 2. 片库 `/library`
-
 - **总库**：所有源按**固定大分类**合并（电视剧 / 短剧 / 电影 / 综艺 / 动漫 / 少儿 / 纪录片 / 知识）。
   源站分类靠关键词归并（国产剧、韩剧、美剧… → 电视剧），
   **短剧单独成类并从电视剧中排除**；每个源每个大分类最多取 2 个 `type_id`，再跨源交错去重。
@@ -27,8 +26,24 @@
 - **地区 / 时间**：源站 API 没有这两个维度，在已加载数据上做二次筛选。
 - 相关接口：`POST /api/library`（跨源合并）、`GET /api/catalog`（单源分页）。
 
-## 新增 / 修改的文件
+### 3. 播放链路修复与增强
 
+- **修复分片流被截断**：`handleProxyRequest` 原来给上游 fetch 挂了 8 秒的
+  `AbortSignal.timeout`，它作用于整个响应体——单个分片 2~8 MB，源站限速时
+  下载超 8 秒就被拦腰切断，浏览器报 `ERR_INCOMPLETE_CHUNKED_ENCODING`，
+  表现为「播放一直缓冲、控制台刷屏」。现改为**只对响应头限时**
+  （`headerTimeoutMs`），拿到响应头后 body 无限时长流式透传，
+  并用 `req.signal` 在客户端断开时终止上游连接。
+- **新增设置「播放总是走服务器代理」**（偏好设置）：默认直连片源 CDN，
+  开启后分片全部经 `/api/proxy` 转发。用于 CDN 对浏览器直连掐流/限流、
+  但服务端拉取正常的源（本地实测可解决持续缓冲）。
+- **代理分片诊断日志**：`/api/proxy` 逐条记录 `expect`（上游声明长度）/
+  `sent`（实际转发）/ `ms` / `outcome`（`eof`、`error:*`、`client-cancel`）
+  到 `logs/proxy.log`（5 MB 上限）。排查「是上游断流还是本地转发中断」时直接看它。
+- **首页 feed 流式加载**：`/api/feed?stream=1` 以 NDJSON 逐源推送，
+  首页边收边上屏；此前 `Promise.all` 要等最慢的源（最长 6 秒）才渲染。
+
+## 新增 / 修改的文件
 新增：
 
 | 文件 | 说明 |
@@ -47,6 +62,9 @@
 | 文件 | 改动 |
 | --- | --- |
 | `src/app/page.tsx` | 首页插入 `SourceFeed` |
+| `src/components/player-shell.tsx` | 支持「播放总是走服务器代理」（`forceProxyPlayback`） |
+| `src/app/api/feed/route.ts` | 支持 `?stream=1` 逐源推送 |
+| `src/lib/proxy-handlers.ts` | 分片流改为仅响应头超时 + 诊断日志 |
 | `src/components/header.tsx` | 顶栏「片库」入口（桌面 + 移动端） |
 | `src/components/icon.tsx` | 新增 `grid` 图标 |
 | `src/lib/client-api.ts` | 新增 `api.feed` / `api.library` / `api.catalog` |
