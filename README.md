@@ -1,10 +1,69 @@
+# LibreTV（个人修改版）
+
+基于 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV) **v2.22.0** 的修改版，遵循 **AGPL-3.0-or-later**（见 [LICENSE](./LICENSE)）。
+
+下面先说明本仓库改了什么；**后半部分是上游原版 README，内容未改动**，部署参数、数据源格式、直播等说明都以它为准。
+
+## 本仓库的改动
+
+### 1. 首页「最新上架」+ 源速度榜
+
+- 把所有已勾选源的最新列表**合并成一张海报墙**：按源轮流取值（round-robin）保证每个源都有曝光，同名影片按归一化标题去重，保留先出现（即更快）的那个源；
+- 顶部一排「速度胶囊」按本次拉取各源列表的服务端耗时排序（<800ms 绿 / <2000ms 黄 / 更慢红），点进去是该源的片库；
+- 接口 `POST /api/feed`，支持 `?stream=1` 以 NDJSON 逐源推送——首页边收边上屏，慢源不再阻塞整块内容。
+
+### 2. 片库 `/library`
+
+- **总库**：各源按**固定大分类**合并——电视剧 / 短剧 / 电影 / 综艺 / 动漫 / 少儿 / 纪录片 / 知识。源站分类靠关键词归并（国产剧、韩剧、美剧… → 电视剧），**短剧单独成类并从电视剧中排除**；每个源每个大类最多取 2 个 `type_id`，再跨源交错合并去重；
+- **类型（题材）**：喜剧 / 爱情 / 动作 … 共 31 个，按源站子分类名匹配（「动作片」→ 动作）；
+- **单源库**：切到某个源时按它自己的分类表分页浏览（上一页 / 下一页）；
+- **地区 / 时间**：源站 API 不支持这两个维度，在已加载的数据上做二次筛选；
+- 接口 `POST /api/library`（跨源合并）、`GET /api/catalog`（单源分页）。
+
+### 3. 播放链路修复
+
+- 代理分片不再被 8 秒总超时截断（改为只对响应头限时），修复 `ERR_INCOMPLETE_CHUNKED_ENCODING` 导致的「播放一直缓冲、控制台刷屏」；
+- 新增设置「播放总是走服务器代理」（偏好设置）：默认直连片源 CDN，开启后分片全部经 `/api/proxy` 转发，用于 CDN 对浏览器直连掐流/限速的源；
+- `/api/proxy` 逐条记录分片诊断日志（`logs/proxy.log`，5 MB 上限，不入库）：`expect` 上游声明长度 / `sent` 实际转发 / `ms` / `outcome`。
+
+## 本地构建
+
+```bash
+pnpm install
+pnpm run build
+PASSWORD=your-password PORT=8080 node node_modules/next/dist/bin/next start -p 8080
+```
+
+> Windows 下不要用 `DOCKER_BUILD=1`：standalone 输出需要创建符号链接，普通权限会失败，直接 `next build` + `next start` 即可。
+
+## 与上游同步
+
+```bash
+git remote add upstream https://github.com/LibreSpark/LibreTV.git
+git fetch upstream && git merge upstream/main
+```
+
+改动集中在下表这些文件；大分类关键词表在 `canonical-categories.ts`，各源分类命名差异大时只改这一个文件。
+
+| 文件 | 说明 |
+| --- | --- |
+| `src/lib/canonical-categories.ts` | 固定大分类与类型的定义、关键词表 |
+| `src/lib/cms-catalog.ts` | Apple CMS 分类/最新列表的取数与缓存 |
+| `src/app/api/feed/route.ts` | 首页各源最新（支持流式） |
+| `src/app/api/library/route.ts` | 总库：跨源大分类合并 |
+| `src/app/api/catalog/route.ts` | 单源分类分页 |
+| `src/app/library/page.tsx` | 片库页 |
+| `src/components/source-feed.tsx` | 首页「最新上架」 |
+| `src/components/poster-card.tsx` | 竖版海报卡 |
+| `src/lib/proxy-handlers.ts` | 分片流超时修复 + 诊断日志 |
+
+---
+
+# 以下为上游原版 README（LibreSpark/LibreTV v2.22.0，内容未改动）
+
 # LibreTV
 
 LibreTV Next.js 迁移版：免费在线视频聚合搜索与观看平台。基于 Next.js 15（App Router）+ TypeScript + Tailwind CSS，播放内核为 ArtPlayer + hls.js，支持亮暗双主题。
-
-> ⚠️ **本仓库是个人修改版（fork）**，基于 [LibreSpark/LibreTV](https://github.com/LibreSpark/LibreTV) v2.22.0。
-> 新增：首页「最新上架」合并海报墙 + 源速度榜、片库页（固定大分类 / 类型 / 地区 / 时间，总库与单源库双模式）。
-> 改动清单、构建与同步上游的方式见 **[FORK-NOTES.md](./FORK-NOTES.md)**。原项目为 AGPL-3.0，本仓库同样遵循。
 
 > 🏠 **官网**：[LibreTV 官网](https://libretv.is-an.org/)
 >
@@ -261,9 +320,28 @@ CI 校验通过后自动构建并推送 `ghcr.io/librespark/libretv:<版本>`（
 - 代理内置 SSRF 防护：拒绝内网/保留地址（含 DNS 解析后校验），仅放行 http(s)。
 - 未登录会话仅允许代理图片类目标（豆瓣封面防盗链需要）。
 
+## 衍生作品
+
+| 项目 | 说明 |
+| --- | --- |
+| [OrionTV](https://github.com/orion-lib/OrionTV) | Apple TV / Android TV 客户端（React Native TVOS + Expo），配合 MoonTV 使用 |
+| [LunaTV](https://github.com/MoonTechLab/LunaTV) | 影视聚合站（Next.js），支持 Redis / Upstash 等多存储后端 |
+| [Selene-TV](https://github.com/MoonTechLab/Selene-TV) | Android TV（Leanback）客户端，Kotlin + Compose，对接 MoonTV / Helios |
+| [EchoTV](https://github.com/hoowhoami/EchoTV) | Flutter 全平台客户端（已归档） |
+| [WarHutTV](https://github.com/OuOumm/WarHutTV) | Go + React 的自托管影视聚合站 |
+| [DecoTV](https://github.com/Decohererk/DecoTV) | 聚合播放站（原 KatelyaTV） |
+| [Joyflix](https://github.com/jeffernn/Joyflix-Mac-Objective-C) | macOS 原生影视聚合客户端（Objective-C） |
+| [MoonCakeTV](https://github.com/MoonCakeTV/MoonCakeTV) | 影视聚合搜索站（Next.js），文件存储、一键脚本部署 |
+| [OrangeTV](https://github.com/djteang/OrangeTV) | 跨平台影视聚合播放器（Next.js），Kvrocks/Redis/Upstash 多存储与多端同步 |
+| [MQTV](https://github.com/MaoLikeQvQ/MQTV) | 重构与优化 LibreTV |
+| [NextTV](https://github.com/SeqCrafter/NextTV) | 影视聚合站（Next.js + Zustand），支持弹幕 |
+| [DpadTV](https://github.com/AresCNZJ/DpadTV) | Android TV 原生客户端（Kotlin + Media3/ExoPlayer），对接自建服务端，不依赖 WebView |
+| [LibreTV-for-HarmonyOS](https://github.com/panhaichen-creator/LibreTV-for-HarmonyOS) | HarmonyOS NEXT 原生客户端（ArkTS + ArkUI + AVPlayer） |
 
 > 旧版 LibreTV（静态 HTML + Express）完整代码见 [backup-2025 分支](https://github.com/LibreSpark/LibreTV/tree/backup-2025)。
 
 ## 免责声明
 
 本项目不存储、不制作任何视频内容，仅提供第三方公开接口的聚合与播放能力，内容的合法性由对应数据源负责。
+
+☕ 觉得有用的话，可以到 [AFDIAN](https://afdian.com/a/veehub) 请我喝杯咖啡。
