@@ -89,15 +89,25 @@ export async function handleProxyRequest(req: Request, targetUrl: string): Promi
   const range = req.headers.get('range');
   if (range) headers.Range = range;
 
+  // 客户端断开（换集 / 关页 / 拖动进度）时终止上游连接，避免连接泄漏
+  const controller = new AbortController();
+  const onClientAbort = () => controller.abort();
+  req.signal.addEventListener('abort', onClientAbort, { once: true });
+
   let response: Response | undefined;
   let finalUrl = targetUrl;
   let lastError: unknown = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const result = await fetchWithSafeRedirects(targetUrl, {
-        headers,
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
+      // 只对「等待响应头」限时，不对 body 设总超时。
+      // 分片动辄 2~8 MB，源站限速时下载一个分片常常超过 8 秒；
+      // 用 AbortSignal.timeout 会把 body 拦腰截断，浏览器报
+      // ERR_INCOMPLETE_CHUNKED_ENCODING（表现为播放一直卡在同一处、疯狂重试）。
+      const result = await fetchWithSafeRedirects(
+        targetUrl,
+        { headers, signal: controller.signal },
+        { headerTimeoutMs: TIMEOUT_MS }
+      );
       response = result.res;
       finalUrl = result.finalUrl;
       lastError = null;
