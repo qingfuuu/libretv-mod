@@ -168,14 +168,27 @@ export function SwitchSourceModal({
     if (targets.length > 0) probe(targets);
   }, [phase, candidates, probe]);
 
+  /**
+   * 排序：当前源 → 可切换的源按「码率从低到高」→ 详情耗时。
+   * 码率决定能不能播完：免费 CDN 晚高峰只有 2 Mbps 左右，3.6 Mbps 的 1080p 源
+   * 再快也会卡，所以把低码率（通常 720p）的源排前面，而不是一味按接口耗时排。
+   */
   const sorted = useMemo(() => [...candidates].sort((a, b) => {
     const aCurrent = isCurrentCandidate(a, currentSourceKey, currentVodId);
     const bCurrent = isCurrentCandidate(b, currentSourceKey, currentVodId);
     if (aCurrent !== bCurrent) return aCurrent ? -1 : 1;
+    if (a.ok !== b.ok) return a.ok ? -1 : 1;
+    const bwOf = (c: typeof a): number => {
+      const q = qualities[qualityKey(c.source.key, c.result.vodId)];
+      return q?.bandwidth && q.bandwidth > 0 ? q.bandwidth : Number.POSITIVE_INFINITY;
+    };
+    const bwA = bwOf(a);
+    const bwB = bwOf(b);
+    if (bwA !== bwB) return bwA - bwB;
     const msA = a.ok ? a.ms ?? 99_999 : 99_999;
     const msB = b.ok ? b.ms ?? 99_999 : 99_999;
     return msA - msB;
-  }), [candidates, currentSourceKey, currentVodId]);
+  }), [candidates, currentSourceKey, currentVodId, qualities]);
 
   /**
    * 面板展示的源：优先用户点过的那个；还没点过时先落到「第一个可切换的源」——
@@ -327,6 +340,11 @@ export function SwitchSourceModal({
                   const key = candidateKey(c);
                   const active = selected === c;
                   const qLabel = qualityLabel(qualities[qualityKey(c.source.key, c.result.vodId)]?.height);
+                  const bw = qualities[qualityKey(c.source.key, c.result.vodId)]?.bandwidth;
+                  const bwLabel = bw && bw > 0 ? `${(bw / 1_000_000).toFixed(1)}M` : '';
+                  // >2.5 Mbps 在晚高峰的免费源上基本跑不满，标黄提醒；>4 Mbps 标红
+                  const bwTone =
+                    bw === undefined ? '' : bw > 4_000_000 ? 'text-danger' : bw > 2_500_000 ? 'text-warning' : 'text-success';
                   return (
                     <button
                       key={key}
@@ -340,10 +358,14 @@ export function SwitchSourceModal({
                         active ? 'border-accent bg-accent/10 text-accent' : 'border-line bg-chip text-muted hover:bg-hover'
                       )}
                       onClick={() => setSelectedKey(key)}
+                      title={bwLabel ? `码率约 ${bwLabel}bps，超过晚高峰实测带宽就会卡` : undefined}
                     >
                       <span className="max-w-[8rem] truncate font-medium">{c.source.name}</span>
                       {isCurrent && <span className="text-[10px] opacity-80">当前</span>}
                       {qLabel && <span className="text-[10px] tabular-nums opacity-70">{qLabel}</span>}
+                      {bwLabel && (
+                        <span className={cn('text-[10px] tabular-nums', bwTone)}>{bwLabel}bps</span>
+                      )}
                       {c.ok ? (
                         <span
                           className={cn(

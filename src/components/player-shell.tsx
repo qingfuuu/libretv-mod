@@ -80,6 +80,8 @@ interface PlayerShellProps {
   miniProgressBar?: boolean;
   /** 播放总是走服务器代理：分片全部经 /api/proxy 转发（直连被 CDN 掐流时的兜底） */
   forceProxyPlayback?: boolean;
+  /** 进度条悬停预览：鼠标移到进度条上显示该时间点的画面（独立解码实例，会额外耗带宽） */
+  progressPreview?: boolean;
   /** 中段两步态的起点：由页面层持有，面板与快捷键共用同一份状态 */
   pendingStart: number | null;
   /** 更新中段起点；null 表示取消或已消费 */
@@ -123,6 +125,7 @@ export function PlayerShell({
   volumeBoost,
   miniProgressBar = true,
   forceProxyPlayback = false,
+  progressPreview = false,
   pendingStart,
   onPendingStart,
   onPlayerApi,
@@ -155,7 +158,7 @@ export function PlayerShell({
   // 始终持有最新 props/回调，避免重建播放器
   const propsRef = useRef({
     url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, volumeBoost, miniProgressBar,
-    forceProxyPlayback,
+    forceProxyPlayback, progressPreview,
     pendingStart, onPendingStart, onPlayerApi, onRecordSegment,
     episodeKey, nextUrl, nextEpisodeKey,
     getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
@@ -163,7 +166,7 @@ export function PlayerShell({
   });
   propsRef.current = {
     url, title, adFilter, autoplayNext, skipMark, autoSkipSegments, volumeBoost, miniProgressBar,
-    forceProxyPlayback,
+    forceProxyPlayback, progressPreview,
     pendingStart, onPendingStart, onPlayerApi, onRecordSegment,
     episodeKey, nextUrl, nextEpisodeKey,
     getRestorePosition, onTimeUpdate, onEnded, onPause, onQuality, onRequestSwitchSource,
@@ -1021,6 +1024,150 @@ export function PlayerShell({
       controlsShown: player.classList.contains(CONTROL_SHOW_CLASS),
     });
   }, [miniProgressBar]);
+
+  // —— 进度条悬停预览：独立的静音解码实例，按需 seek 抓帧 ——
+  // 每个 5 秒区间第一次悬停要拉一个分片，慢源上会跟播放抢带宽，所以设置里默认关闭。
+  useEffect(() => {
+    if (!progressPreview) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    let box: HTMLDivElement | null = null;
+    let img: HTMLImageElement | null = null;
+    let label: HTMLSpanElement | null = null;
+    let previewVideo: HTMLVideoElement | null = null;
+    let previewHls: Hls | null = null;
+    let progressEl: HTMLElement | null = null;
+    let hideTimer: ReturnType<typeof setTimeout> | null = null;
+    let seekTimer: ReturnType<typeof setTimeout> | null = null;
+    let attachTimer: ReturnType<typeof setTimeout> | null = null;
+    const cache = new Map<number, string>();
+
+    const ensureBox = (): HTMLDivElement => {
+      if (box) return box;
+      box = document.createElement('div');
+      box.style.cssText =
+        'position:absolute;z-index:40;pointer-events:none;display:none;width:160px;height:90px;' +
+        'border-radius:6px;overflow:hidden;background:#000;box-shadow:0 6px 20px rgba(0,0,0,.45);' +
+        'transform:translate(-50%,-100%);left:0;top:0';
+      img = document.createElement('img');
+      img.style.cssText = 'display:block;width:160px;height:90px;object-fit:cover';
+      label = document.createElement('span');
+      label.style.cssText =
+        'position:absolute;left:0;right:0;bottom:0;padding:1px 4px;text-align:center;' +
+        'font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#fff;background:rgba(0,0,0,.62)';
+      box.appendChild(img);
+      box.appendChild(label);
+      container.appendChild(box);
+      return box;
+    };
+
+    const ensureVideo = (): HTMLVideoElement => {
+      if (previewVideo) return previewVideo;
+      const v = document.createElement('video');
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = 'auto';
+      v.crossOrigin = 'anonymous';
+      v.style.cssText = 'position:absolute;left:-99999px;top:0;width:2px;height:2px';
+      container.appendChild(v);
+      const h = new Hls(buildHlsConfig());
+      h.loadSource(currentMediaUrlRef.current);
+      h.attachMedia(v);
+      previewVideo = v;
+      previewHls = h;
+      return v;
+    };
+
+    const capture = (time: number) => {
+      const b = ensureBox();
+      const bucket = Math.floor(time / 5) * 5;
+      if (label) label.textContent = formatTime(time);
+      const cached = cache.get(bucket);
+      if (cached) {
+        if (img) img.src = cached;
+        return;
+      }
+      const v = ensureVideo();
+      v.addEventListener(
+        'seeked',
+        () => {
+          try {
+            const canvas = document.createElement('canvas');
+            canvas.width = 160;
+            canvas.height = 90;
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+            const url = canvas.toDataURL('image/jpeg', 0.6);
+            cache.set(bucket, url);
+            if (img) img.src = url;
+          } catch {
+            /* 跨域污染画布：这个源不支持抓帧，保持上一张 */
+          }
+        },
+        { once: true }
+      );
+      try {
+        v.currentTime = time;
+      } catch {
+        /* 元数据还没就绪 */
+      }
+      b.style.display = 'block';
+    };
+
+    const onMove = (e: MouseEvent) => {
+      const progress = progressEl;
+      if (!progress) return;
+      const duration = (artRef.current?.video?.duration as number) || 0;
+      if (!duration || !Number.isFinite(duration)) return;
+      const rect = progress.getBoundingClientRect();
+      const hostRect = container.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      const time = ratio * duration;
+
+      const b = ensureBox();
+      b.style.left = `${e.clientX - hostRect.left}px`;
+      b.style.top = `${rect.top - hostRect.top - 8}px`;
+      b.style.display = 'block';
+      if (label) label.textContent = formatTime(time);
+
+      if (hideTimer) clearTimeout(hideTimer);
+      if (seekTimer) clearTimeout(seekTimer);
+      // 悬停稳定 220ms 再抓帧，快速划过不触发一堆分片请求
+      seekTimer = setTimeout(() => capture(time), 220);
+    };
+
+    const onLeave = () => {
+      if (seekTimer) clearTimeout(seekTimer);
+      hideTimer = setTimeout(() => {
+        if (box) box.style.display = 'none';
+      }, 120);
+    };
+
+    const attach = () => {
+      progressEl = container.querySelector('.art-progress');
+      if (!progressEl) {
+        // 播放器还没渲染出控制栏：稍后重试几次
+        attachTimer = setTimeout(attach, 500);
+        return;
+      }
+      progressEl.addEventListener('mousemove', onMove);
+      progressEl.addEventListener('mouseleave', onLeave);
+    };
+    attach();
+
+    return () => {
+      if (attachTimer) clearTimeout(attachTimer);
+      if (hideTimer) clearTimeout(hideTimer);
+      if (seekTimer) clearTimeout(seekTimer);
+      progressEl?.removeEventListener('mousemove', onMove);
+      progressEl?.removeEventListener('mouseleave', onLeave);
+      previewHls?.destroy();
+      previewVideo?.remove();
+      box?.remove();
+    };
+  }, [progressPreview, url]);
 
   // —— 上/下集禁用态：走 ArtPlayer 的 controls API 更新样式，不直接改 DOM ——
   // 直接 querySelector 改 style 在控件重建（切全屏/播放器重绘）后不会恢复，且依赖内部 class 名。

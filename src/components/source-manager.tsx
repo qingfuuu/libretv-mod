@@ -627,7 +627,24 @@ function PlaybackPanel() {
 
       <VideoCachePanel />
       <PlaybackProxyPanel />
+      <ProgressPreviewPanel />
     </section>
+  );
+}
+
+/** 进度条悬停预览开关：独立解码实例按需抓帧，慢源上会额外耗带宽，默认关 */
+function ProgressPreviewPanel() {
+  const enabled = useAppStore((s) => s.progressPreview);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  return (
+    <div className="pt-3 mt-3 border-t border-line">
+      <ToggleRow
+        label="进度条悬停预览"
+        description="鼠标移到进度条上显示该时间点的画面；每 5 秒区间首次悬停要拉一个分片，慢源上可能拖慢播放，建议带宽充足时开启"
+        checked={enabled}
+        onChange={(v) => updateSettings({ progressPreview: v })}
+      />
+    </div>
   );
 }
 

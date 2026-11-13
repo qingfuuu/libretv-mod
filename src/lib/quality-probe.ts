@@ -79,6 +79,63 @@ export function parseBestHeight(text: string): number | undefined {
   return best;
 }
 
+/** 从 master playlist 解析最高档带宽（bps）；非 master 返回 undefined */
+export function parseBestBandwidth(text: string): number | undefined {
+  if (!text.includes('#EXT-X-STREAM-INF')) return undefined;
+  let best: number | undefined;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('#EXT-X-STREAM-INF')) continue;
+    const bandwidth = parseInt(line.match(/BANDWIDTH=(\d+)/)?.[1] || '0', 10);
+    if (bandwidth > 0 && (best === undefined || bandwidth > best)) best = bandwidth;
+  }
+  return best;
+}
+
+/**
+ * 单码率媒体列表：用首个分片的体积 ÷ 时长估算码率（bps）。
+ * 免费采集站大多只给单码率，m3u8 里没有 BANDWIDTH，只能靠分片反推——
+ * 这个值决定了「能不能播完」：低于实测可用带宽才不卡。
+ */
+export async function probeSegmentBandwidth(
+  playlistUrl: string,
+  text: string,
+  source: SourceConfig,
+  signal: AbortSignal
+): Promise<number | undefined> {
+  const info = parseMediaPlaylist(text);
+  const first = info.firstSegment;
+  if (!first) return undefined;
+
+  // 取首个分片前面那条 EXTINF 的时长
+  let duration = 0;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('#EXTINF:')) {
+      duration = parseFloat(line.slice('#EXTINF:'.length).split(',')[0]);
+      continue;
+    }
+    if (!line.startsWith('#') && line === first) break;
+  }
+  if (!Number.isFinite(duration) || duration <= 0) return undefined;
+
+  const segUrl = resolveUrl(playlistUrl, first);
+  if (!segUrl) return undefined;
+  try {
+    const res = await fetchUpstream(segUrl, {
+      method: 'HEAD',
+      timeoutMs: 4000,
+      headers: probeHeaders(source),
+      signal,
+    });
+    const len = parseInt(res.headers.get('content-length') || '', 10);
+    if (!Number.isFinite(len) || len <= 0) return undefined;
+    return Math.round((len * 8) / duration);
+  } catch {
+    return undefined;
+  }
+}
+
 /** 媒体列表里解析分片所需的片段信息 */
 export interface MediaPlaylistInfo {
   initUri?: string;
@@ -322,7 +379,7 @@ async function probeEpisode(
   source: SourceConfig,
   merged: AbortSignal,
   signal?: AbortSignal
-): Promise<{ height?: number; error?: string }> {
+): Promise<{ height?: number; bandwidth?: number; error?: string }> {
   // 末尾允许 ?query / #fragment：不少源在 .m3u8 后挂鉴权参数或分片锚点
   const isM3u8 = /\.m3u8([?#]|$)/i.test(target);
 
@@ -342,10 +399,13 @@ async function probeEpisode(
   const text = await readTextPrefix(res, M3U8_MAX_BYTES);
 
   const height = parseBestHeight(text);
-  if (height !== undefined) return { height };
+  if (height !== undefined) return { height, bandwidth: parseBestBandwidth(text) };
 
   // 单码率媒体列表：m3u8 里没有档位信息，下沉到分片挖分辨率
-  return { height: await withSegmentBudget(target, text, source, merged, signal) };
+  const mediaHeight = await withSegmentBudget(target, text, source, merged, signal);
+  // 顺带用首个分片体积估一下码率（HEAD 很快，失败就算了）
+  const bandwidth = await probeSegmentBandwidth(target, text, source, merged).catch(() => undefined);
+  return { height: mediaHeight, bandwidth };
 }
 
 /**
@@ -375,16 +435,19 @@ export async function probeQuality(item: QualityProbeItem, signal?: AbortSignal)
 
     const startedAt = Date.now();
     let lastError: string | undefined;
+    let fallbackBandwidth: number | undefined;
     for (const target of probeEpisodeOrder(episodes)) {
       const r = await probeEpisode(target, source, merged, signal);
-      if (r.height !== undefined) return { ...base, height: r.height };
+      if (r.bandwidth !== undefined && fallbackBandwidth === undefined) fallbackBandwidth = r.bandwidth;
+      if (r.height !== undefined) return { ...base, height: r.height, bandwidth: r.bandwidth ?? fallbackBandwidth };
       if (r.error) lastError = r.error;
       // 源站级拒绝（401/403）换集也不会变，不必再耗一轮超时
       if (lastError && /^HTTP (401|403)$/.test(lastError)) break;
       // 慢源换集重试会把 8s 总死线打穿，反而把「未知」变成「探测失败」：时间过半就不再换集
       if (Date.now() - startedAt > QUALITY_PROBE_TIMEOUT_MS / 2) break;
     }
-    return lastError ? { ...base, error: lastError } : base;
+    // 画质没探出来，但码率已知：这已经足够判断「能不能播完」，一并带回去
+    return lastError ? { ...base, bandwidth: fallbackBandwidth, error: lastError } : { ...base, bandwidth: fallbackBandwidth };
   } catch (err) {
     // 客户端主动中止：不算失败，也不该污染缓存
     if (signal?.aborted) throw err;

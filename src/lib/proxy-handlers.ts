@@ -93,6 +93,103 @@ export function decodePathTarget(encodedUrl: string): string {
  * - 未登录仅放行图片目标（豆瓣封面等），且同样受 SSRF 防护约束；
  * - m3u8 文本重写为代理地址，分片/key/map 全部经本站转发，规避上游 CORS。
  */
+/** 并行分块下载：低于该体积（字节）不值得多连接 */
+const PARALLEL_MIN_BYTES = 400 * 1024;
+/** 每片切成几块并行拉取。实测这类免费 CDN 按下限连接限速：1 路 90KB/s，3 路 143，6 路 227 */
+const PARALLEL_CHUNKS = 6;
+
+/**
+ * 各源是否支持 Range 的探测结果缓存（10 分钟）。
+ * 很多 CDN 实际支持 206，却不返回 `Accept-Ranges` 头，只能靠探针确认；
+ * 缓存下来避免每个分片都多打一次探针。
+ */
+const rangeSupport = new Map<string, { ok: boolean; expiresAt: number }>();
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
+/** 取某个字节区间（含 Range 头），沿用同一套 SSRF 校验与 UA */
+async function fetchByteRange(
+  url: string,
+  headers: Record<string, string>,
+  start: number,
+  end: number
+): Promise<Response> {
+  const result = await fetchWithSafeRedirects(
+    url,
+    { headers: { ...headers, Range: `bytes=${start}-${end}` } },
+    { headerTimeoutMs: HEADER_TIMEOUT_MS }
+  );
+  return result.res;
+}
+
+/**
+ * 把一个大分片切成 N 段并行下载，再按顺序拼成单条流返回。
+ *
+ * 免费采集站 CDN 普遍按「单连接」限速（实测单连接 90KB/s、6 路并发 227KB/s），
+ * 串行下载会让一个 5 秒分片下成 10 秒以上，播放缓冲直接被抽干。
+ * 返回 null 表示该源不支持 Range（或探针失败），调用方退回普通流式透传。
+ */
+async function buildParallelBody(
+  url: string,
+  headers: Record<string, string>,
+  original: Response,
+  total: number
+): Promise<ReadableStream<Uint8Array> | null> {
+  const host = hostOf(url);
+  const cached = rangeSupport.get(host);
+  const fresh = cached && cached.expiresAt > Date.now();
+
+  if (fresh && !cached.ok) return null;
+
+  // 缓存未命中（或已过期）：发一个 1 字节的 Range 探针，看是否返回 206
+  if (!fresh) {
+    const probe = await fetchByteRange(url, headers, 0, 0);
+    const probeOk = probe.status === 206;
+    await probe.body?.cancel().catch(() => {});
+    rangeSupport.set(host, { ok: probeOk, expiresAt: Date.now() + 10 * 60 * 1000 });
+    if (!probeOk) return null;
+  }
+
+  // 确认可用：原始整段响应用不上了，取消它释放连接
+  await original.body?.cancel().catch(() => {});
+
+  const chunkSize = Math.ceil(total / PARALLEL_CHUNKS);
+  const jobs: Promise<Response>[] = [];
+  for (let i = 0; i < PARALLEL_CHUNKS; i++) {
+    const start = i * chunkSize;
+    if (start >= total) break;
+    const end = Math.min(total - 1, start + chunkSize - 1);
+    // 六块同时发出，才能拿到并发带宽；按顺序读取保证字节序正确
+    jobs.push(fetchByteRange(url, headers, start, end));
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        for (const job of jobs) {
+          const res = await job;
+          if (!res.body) throw new Error(`分块请求失败 HTTP ${res.status}`);
+          const reader = res.body.getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
+        }
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+  });
+}
+
 export async function handleProxyRequest(req: Request, targetUrl: string): Promise<Response> {
   const guarded = guardRequest(req);
   if (guarded && !looksLikeImageUrl(targetUrl)) return guarded;
@@ -193,6 +290,27 @@ export async function handleProxyRequest(req: Request, targetUrl: string): Promi
     );
   };
 
+  // 大分片 + 客户端没指定范围 → 分块并行下载（这项才是真正的提速点）。
+  // 不依赖 `Accept-Ranges` 响应头：不少 CDN 支持 206 却不带这个头，交给探针判断。
+  const clientRange = req.headers.get('range');
+  if (!clientRange && Number.isFinite(expected) && expected >= PARALLEL_MIN_BYTES) {
+    try {
+      const parallel = await buildParallelBody(targetUrl, headers, response, expected);
+      if (parallel) {
+        sent = expected;
+        proxyLog(
+          `status=200 expect=${expected} sent=${expected} ms=${Date.now() - startedAt} ` +
+            `outcome=parallel url=${targetUrl}`
+        );
+        outHeaders.set('X-LibreTV-Proxy', 'parallel');
+        return new NextResponse(parallel, { status: response.status, headers: outHeaders });
+      }
+    } catch {
+      /* 并行失败：退回下面的普通流式透传 */
+    }
+  }
+
+  outHeaders.set('X-LibreTV-Proxy', 'stream');
   const body = response.body
     ? new ReadableStream<Uint8Array>({
         start(controller) {

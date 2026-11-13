@@ -52,6 +52,8 @@ export interface AppSettings {
    * 打开后所有分片经 /api/proxy 转发，用于直连被 CDN 掐流/限速、反复缓冲的场景。
    */
   forceProxyPlayback: boolean;
+  /** 进度条悬停预览：默认关闭（每个区间要额外拉一个分片，慢源上会抢带宽） */
+  progressPreview: boolean;
 }
 
 /** 一次订阅同步导入的数量（点播 / 直播），用于列表内展示同步结果 */
@@ -368,6 +370,7 @@ export const useAppStore = create<AppState>()(
       imageProxyModeTouched: false,
       customImageProxy: '',
       forceProxyPlayback: false,
+      progressPreview: false,
 
       addCustomApi: (api) => {
         const list = get().customAPIs;
@@ -964,6 +967,7 @@ export const useAppStore = create<AppState>()(
         imageProxyModeTouched: s.imageProxyModeTouched,
         customImageProxy: s.customImageProxy,
         forceProxyPlayback: s.forceProxyPlayback,
+        progressPreview: s.progressPreview,
       }),
       // 同步 storage 会在模块加载时立即 rehydrate（早于 React hydration），
       // 一旦首屏渲染依赖持久化状态就会与 SSR 输出不一致。

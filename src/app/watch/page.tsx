@@ -329,6 +329,7 @@ function WatchContent() {
                   volumeBoost={store.volumeBoost}
                   miniProgressBar={store.miniProgressBar}
                   forceProxyPlayback={store.forceProxyPlayback}
+                  progressPreview={store.progressPreview}
                   pendingStart={pendingStart}
                   onPendingStart={setPendingStart}
                   onPlayerApi={(api) => { playerApiRef.current = api; }}

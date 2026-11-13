@@ -73,6 +73,11 @@ export interface SourceSearchOutcome {
  */
 export interface QualityEntry {
   height?: number;
+  /**
+   * 码率（bps）：多码率源取最高档 BANDWIDTH，单码率源用首个分片体积 ÷ 时长估算。
+   * 它决定「能不能播完」——高于实测可用带宽的源必然卡。
+   */
+  bandwidth?: number;
   from: 'play' | 'probe';
   /**
    * 探测失败原因（如 `HTTP 403`、`请求超时`）。
@@ -95,6 +100,8 @@ export interface QualityProbeResult {
   sourceKey: string;
   vodId: string;
   height?: number;
+  /** 码率（bps），测不出时缺失 */
+  bandwidth?: number;
   error?: string;
 }
 
