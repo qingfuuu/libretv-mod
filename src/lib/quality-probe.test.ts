@@ -187,6 +187,13 @@ function urls(): string[] {
   return mocks.fetchUpstream.mock.calls.map((call) => call[0] as string);
 }
 
+/** 取某个 URL 对应的请求方法列表（默认 GET）；用于区分「下载」与「只取响应头的 HEAD」 */
+function methodsFor(url: string): string[] {
+  return mocks.fetchUpstream.mock.calls
+    .filter((call) => call[0] === url)
+    .map((call) => ((call[1] as { method?: string } | undefined)?.method ?? 'GET').toUpperCase());
+}
+
 describe('probeEpisodeOrder', () => {
   it('多集：中间集优先，最后一集作为换集重试的对象', () => {
     expect(probeEpisodeOrder(['a', 'b', 'c'])).toEqual(['b', 'c']);
@@ -234,7 +241,8 @@ describe('probeQuality 降级到分片解析', () => {
     const result = await probeQuality({ source: SOURCE, id: '123' });
     expect(result.height).toBe(1080);
     expect(urls()).toContain('https://cdn.test/2024/01/abc/init.mp4');
-    expect(urls().some((u) => u.endsWith('.m4s'))).toBe(false);
+    // 媒体分片只允许 HEAD（估码率时取 Content-Length），不允许真正下载
+    expect(methodsFor('https://cdn.test/2024/01/abc/seg0.m4s').filter((m) => m !== 'HEAD')).toEqual([]);
   });
 
   it('SAMPLE-AES 加密：服务端解不开，放弃而不是给出错误分辨率', async () => {
